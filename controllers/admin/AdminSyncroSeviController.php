@@ -329,11 +329,12 @@ $this->context->smarty->assign(array(
     }
 
     /**
-     * Generar token para webhook
+     * Obtener token para webhook (FIJO, no se regenera)
      */
     protected function generateWebhookToken()
     {
-        return md5('syncrosevi_' . Configuration::get('PS_SHOP_NAME') . '_' . Configuration::get('PS_SHOP_EMAIL') . '_' . date('Y-m'));
+        // Usar el token FIJO guardado en configuración (generado en la instalación)
+        return Configuration::get('SYNCROSEVI_WEBHOOK_TOKEN');
     }
 
     /**
@@ -819,16 +820,21 @@ $updated = Db::getInstance()->update('syncrosevi_child_shops', array(
     }
 
     /**
-     * Procesar pedidos
+     * Procesar pedidos (con límite por lotes)
      */
     protected function processOrders()
     {
         try {
             $module = Module::getInstanceByName('syncrosevi');
-            $results = $module->processOrders();
-            
-            $this->confirmations[] = $this->l('Procesamiento completado');
-            
+
+            // Obtener límite configurado (por defecto 50)
+            $batchLimit = (int)Configuration::get('SYNCROSEVI_BATCH_LIMIT') ?: 50;
+
+            // Procesar con límite para evitar timeouts
+            $results = $module->processOrders($batchLimit);
+
+            $this->confirmations[] = $this->l('Procesamiento completado (límite: ' . $batchLimit . ' pedidos por tienda)');
+
             foreach ($results as $result) {
                 if ($result['status'] == 'success') {
                     if (isset($result['order_id'])) {

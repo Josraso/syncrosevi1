@@ -246,20 +246,24 @@ class Syncrosevi extends Module
 
     private function createInitialConfig()
     {
-        // Generar token de webhook
-        $webhook_token = md5('syncrosevi_' . Configuration::get('PS_SHOP_NAME') . '_' . Configuration::get('PS_SHOP_EMAIL') . '_' . date('Y-m'));
+        // Generar token de webhook FIJO (no depende de fecha para que no cambie cada mes)
+        $webhook_token = md5('syncrosevi_' . Configuration::get('PS_SHOP_NAME') . '_' . Configuration::get('PS_SHOP_EMAIL') . '_' . uniqid() . '_' . time());
         Configuration::updateValue('SYNCROSEVI_WEBHOOK_TOKEN', $webhook_token);
-        
+
+        // Configurar límite de procesamiento por lotes (por defecto 50 pedidos por ejecución)
+        // Evita timeouts y sobrecarga cuando hay muchos pedidos pendientes
+        Configuration::updateValue('SYNCROSEVI_BATCH_LIMIT', 50);
+
         // Crear directorio de logs
         $logDir = dirname(__FILE__) . '/logs';
         if (!is_dir($logDir)) {
             mkdir($logDir, 0755, true);
         }
-        
+
         // Crear archivo .htaccess para proteger logs
         $htaccessContent = "Order Deny,Allow\nDeny from all\n";
         file_put_contents($logDir . '/.htaccess', $htaccessContent);
-        
+
         return true;
     }
 
@@ -267,6 +271,7 @@ class Syncrosevi extends Module
     {
         Configuration::deleteByName('SYNCROSEVI_WEBHOOK_TOKEN');
         Configuration::deleteByName('SYNCROSEVI_FREE_CARRIER_ID');
+        Configuration::deleteByName('SYNCROSEVI_BATCH_LIMIT');
         return true;
     }
 
@@ -603,8 +608,10 @@ $sql[] = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . 'syncrosevi_order_tracki
 
 	/**
      * Procesar pedidos pendientes - CREAR UN SOLO PEDIDO CONSOLIDADO
+     *
+     * @param int $limit Número máximo de pedidos a procesar por tienda (0 = sin límite)
      */
-    public function processOrders()
+    public function processOrders($limit = 0)
     {
         $childShops = Db::getInstance()->executeS(
             'SELECT * FROM `' . _DB_PREFIX_ . 'syncrosevi_child_shops` WHERE `active` = 1'
@@ -614,12 +621,35 @@ $sql[] = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . 'syncrosevi_order_tracki
 
         foreach ($childShops as $shop) {
             try {
-                // Obtener TODAS las líneas pendientes para esta tienda
-                $pendingLines = Db::getInstance()->executeS(
-                    'SELECT * FROM `' . _DB_PREFIX_ . 'syncrosevi_order_lines` 
-                     WHERE id_child_shop = ' . (int)$shop['id_child_shop'] . ' 
-                     AND processed = 0'
-                );
+                // Obtener las líneas pendientes para esta tienda (con límite opcional)
+                $sql = 'SELECT * FROM `' . _DB_PREFIX_ . 'syncrosevi_order_lines`
+                        WHERE id_child_shop = ' . (int)$shop['id_child_shop'] . '
+                        AND processed = 0';
+
+                // Si hay límite, aplicarlo por cantidad de pedidos distintos
+                if ($limit > 0) {
+                    // Primero obtenemos los IDs de pedidos únicos con límite
+                    $limitedOrderIds = Db::getInstance()->executeS(
+                        'SELECT DISTINCT id_original_order FROM `' . _DB_PREFIX_ . 'syncrosevi_order_lines`
+                         WHERE id_child_shop = ' . (int)$shop['id_child_shop'] . '
+                         AND processed = 0
+                         LIMIT ' . (int)$limit
+                    );
+
+                    if (empty($limitedOrderIds)) {
+                        continue;
+                    }
+
+                    // Extraer solo los IDs
+                    $orderIds = array_map(function($row) { return (int)$row['id_original_order']; }, $limitedOrderIds);
+
+                    // Modificar consulta para obtener solo líneas de estos pedidos
+                    $sql .= ' AND id_original_order IN (' . implode(',', $orderIds) . ')';
+
+                    $this->log('Procesando lote de ' . count($orderIds) . ' pedidos para tienda ' . $shop['name']);
+                }
+
+                $pendingLines = Db::getInstance()->executeS($sql);
 
                 if (empty($pendingLines)) {
                     continue;

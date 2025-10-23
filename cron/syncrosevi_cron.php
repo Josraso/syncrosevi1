@@ -110,18 +110,23 @@ class SyncroSeviCron
     }
     
     /**
-     * Ejecutar SOLO procesamiento de pedidos
+     * Ejecutar SOLO procesamiento de pedidos (con límite por lotes)
      */
     public function processOrders()
     {
         $this->log("=== INICIANDO PROCESAMIENTO DE PEDIDOS ===");
-        
+
         try {
-            $results = $this->module->processOrders();
-            
+            // Obtener límite configurado (por defecto 50 si no existe)
+            $batchLimit = (int)Configuration::get('SYNCROSEVI_BATCH_LIMIT') ?: 50;
+            $this->log("Límite de lote configurado: {$batchLimit} pedidos por tienda");
+
+            // Procesar con límite para evitar timeouts
+            $results = $this->module->processOrders($batchLimit);
+
             $totalProcessed = 0;
             $errors = [];
-            
+
             foreach ($results as $result) {
                 if ($result['status'] == 'success') {
                     $totalProcessed++;
@@ -135,10 +140,10 @@ class SyncroSeviCron
                     $this->log("✗ " . $result['shop'] . ": Error - " . $result['message']);
                 }
             }
-            
+
             $this->log("=== PROCESAMIENTO COMPLETADO ===");
             $this->log("Total procesados: {$totalProcessed} pedidos");
-            
+
             if (!empty($errors)) {
                 $this->log("Errores encontrados: " . count($errors));
                 foreach ($errors as $error) {
@@ -146,9 +151,9 @@ class SyncroSeviCron
                 }
                 return false;
             }
-            
+
             return true;
-            
+
         } catch (Exception $e) {
             $this->log("ERROR CRÍTICO en procesamiento: " . $e->getMessage());
             return false;
