@@ -1031,60 +1031,64 @@ $sql[] = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . 'syncrosevi_order_tracki
     }
 
     /**
-     * Añadir productos al carrito - VERSIÓN SIMPLIFICADA
+     * Añadir productos al carrito - VERSIÓN OPTIMIZADA (evita consumo excesivo de memoria)
      */
     private function addProductsToCart($cart, $products, $shop)
 {
     $addedCount = 0;
     $notFoundCount = 0;
-    
+
     // FORZAR EL GRUPO DE LA TIENDA PARA PRECIOS CORRECTOS
     $customer = new Customer($cart->id_customer);
     $originalGroupId = $customer->id_default_group;
     $customer->id_default_group = $shop['id_group'];
     $customer->update();
-    
+
     // ESTABLECER CONTEXTO CON EL GRUPO CORRECTO
     $context = Context::getContext();
     $context->customer = $customer;
     $context->cart = $cart;
-    
+
+    // CREAR OBJETOS UNA SOLA VEZ (no en cada iteración)
+    $shopObject = new Shop($cart->id_shop);
+
+    // INCREMENTAR LÍMITE DE MEMORIA TEMPORALMENTE para pedidos grandes
+    $currentMemoryLimit = ini_get('memory_limit');
+    ini_set('memory_limit', '768M');
+
     foreach ($products as $product) {
             $reference = trim($product['product_reference']);
-            
+
             if (empty($reference)) {
                 continue;
             }
-            
+
             $productFound = $this->findProductByReference($reference);
             if (!$productFound) {
                 $notFoundCount++;
                 $this->log('Producto NO encontrado: "' . $reference . '" - CONTINUANDO');
                 continue;
             }
-            
+
             // Asegurar stock
             $this->ensureProductStock($productFound['id_product'], $productFound['id_product_attribute'], $product['quantity']);
-            
-            // CONFIGURAR CONTEXTO ANTES DE AÑADIR AL CARRITO
-$context = Context::getContext();
-$originalCustomer = $context->customer;
-$context->customer = new Customer($cart->id_customer);
 
-// Añadir al carrito con contexto correcto
-$result = $cart->updateQty(
-    $product['quantity'],
-    $productFound['id_product'],
-    $productFound['id_product_attribute'],
-    false,  // $id_customization
-    'up',   // $operator
-    $cart->id_address_delivery,
-    new Shop($cart->id_shop),
-    false   // $auto_add_cart_rule
-);
+            // Añadir al carrito SIN crear objetos nuevos cada vez
+            $result = $cart->updateQty(
+                $product['quantity'],
+                $productFound['id_product'],
+                $productFound['id_product_attribute'],
+                false,  // $id_customization
+                'up',   // $operator
+                $cart->id_address_delivery,
+                $shopObject,  // Usar objeto creado una sola vez
+                false   // $auto_add_cart_rule
+            );
 
-// Restaurar contexto original
-$context->customer = $originalCustomer;
+            // LIBERAR MEMORIA después de cada producto
+            if ($addedCount > 0 && $addedCount % 10 == 0) {
+                gc_collect_cycles(); // Forzar recolección de basura cada 10 productos
+            }
             
             if ($result) {
                 $addedCount++;
@@ -1093,27 +1097,30 @@ $context->customer = $originalCustomer;
                 $this->log('✗ Error añadiendo "' . $reference . '"');
             }
         }
-        
+
+        // RESTAURAR LÍMITE DE MEMORIA ORIGINAL
+        ini_set('memory_limit', $currentMemoryLimit);
+
         $this->log('RESUMEN: ' . $addedCount . ' productos añadidos, ' . $notFoundCount . ' no encontrados');
-    
+
     // RESTAURAR GRUPO ORIGINAL DEL CLIENTE
     $customer->id_default_group = $originalGroupId;
     $customer->update();
-    
+
     if ($addedCount === 0) {
         throw new Exception('No se pudo añadir NINGÚN producto al carrito');
     }
-    
+
     return $addedCount;
 }
 
     /**
-     * Configurar transportista del carrito - VERSIÓN SIMPLIFICADA
+     * Configurar transportista del carrito - VERSIÓN OPTIMIZADA (reduce recálculos)
      */
     private function configureCartShipping($cart, $shop)
     {
         $carrierId = null;
-        
+
         if (!empty($shop['id_carrier'])) {
             // Usar transportista específico configurado
             $carrier = new Carrier($shop['id_carrier']);
@@ -1124,7 +1131,7 @@ $context->customer = $originalCustomer;
                 $this->log('Transportista configurado no válido, usando gratuito');
             }
         }
-        
+
         if (!$carrierId) {
             // Usar nuestro transportista gratuito de SyncroSevi
             $carrierId = Configuration::get('SYNCROSEVI_FREE_CARRIER_ID');
@@ -1133,73 +1140,22 @@ $context->customer = $originalCustomer;
             }
             $this->log('Usando transportista gratuito de SyncroSevi: ' . $carrierId);
         }
-        
+
+        // Configurar transportista y delivery option en una sola operación
         $cart->id_carrier = $carrierId;
-$cart->update();
-
-// FORZAR RECÁLCULO DE GASTOS DE ENVÍO
-$cart->getPackageList(true); // Limpiar cache de paquetes
-$cart->getDeliveryOptionList(null, true); // Recalcular opciones de entrega
-
-// VERIFICAR que ahora calcula bien el envío
-$shippingCost = $cart->getOrderTotal(false, Cart::ONLY_SHIPPING);
-$this->log('✓ Transportista configurado para carrito ID ' . $cart->id . ': ' . $carrierId);
-$this->log('✓ Gastos de envío recalculados: ' . $shippingCost . '€');
-
-// Si sigue siendo 0, FORZAR el coste de envío en el carrito
-if ($shippingCost == 0) {
-    $manualShippingCost = $cart->getPackageShippingCost($carrierId);
-    $this->log('DEBUG: Coste manual del transportista ' . $carrierId . ': ' . $manualShippingCost . '€');
-    
-    if ($manualShippingCost > 0) {
-        $this->log('FORZANDO gastos de envío en el carrito...');
-        
-        // FORZAR la delivery option en el carrito
         $delivery_option = array($cart->id_address_delivery => $carrierId . ',');
         $cart->setDeliveryOption($delivery_option);
         $cart->update();
-        
-        // VERIFICAR de nuevo
-        $newShippingCost = $cart->getOrderTotal(false, Cart::ONLY_SHIPPING);
-        $this->log('Nuevo coste de envío tras forzar: ' . $newShippingCost . '€');
-        
-        // Si TODAVÍA sigue a 0, usar método directo
-        if ($newShippingCost == 0) {
-            $this->forceShippingCostInCart($cart, $manualShippingCost);
+
+        $this->log('✓ Transportista configurado para carrito ID ' . $cart->id . ': ' . $carrierId);
+
+        // Solo verificar coste si estamos en modo debug
+        if ($this->debug) {
+            $shippingCost = $cart->getOrderTotal(false, Cart::ONLY_SHIPPING);
+            $this->log('DEBUG: Gastos de envío: ' . $shippingCost . '€');
         }
-    }
 }
-}
-/**
- * Forzar coste de envío directamente en el carrito
- */
-private function forceShippingCostInCart($cart, $shippingCost)
-{
-    $this->log('MÉTODO DIRECTO: Forzando ' . $shippingCost . '€ de envío en carrito ' . $cart->id);
-    
-    try {
-        // Crear delivery option personalizada
-        $delivery_option = array(
-            $cart->id_address_delivery => $cart->id_carrier . ','
-        );
-        
-        // Guardar en base de datos directamente
-        Db::getInstance()->delete('cart_rule', 'id_cart = ' . (int)$cart->id);
-        
-        $cart->setDeliveryOption($delivery_option);
-        $cart->update();
-        
-        // Forzar recálculo total
-        $cart->getPackageList(true);
-        $cart->getDeliveryOptionList(null, true);
-        
-        $finalShippingCost = $cart->getOrderTotal(false, Cart::ONLY_SHIPPING);
-        $this->log('RESULTADO FINAL: Envío forzado = ' . $finalShippingCost . '€');
-        
-    } catch (Exception $e) {
-        $this->log('ERROR forzando envío: ' . $e->getMessage());
-    }
-}
+
     /**
      * Asegurar que hay stock suficiente
      */
@@ -1222,32 +1178,30 @@ private function forceShippingCostInCart($cart, $shippingCost)
     }
 
     /**
-     * Crear pedido desde carrito usando Payment module
+     * Crear pedido desde carrito usando Payment module - VERSIÓN OPTIMIZADA
      */
     private function createOrderFromCart($cart, $shop)
     {
-       // FORZAR RECÁLCULO DEL CARRITO CON ENVÍO
-// DIAGNÓSTICO: Ver qué pasa con el carrito
-$productsTotal = $cart->getOrderTotal(false, Cart::ONLY_PRODUCTS);
-$shippingTotal = $cart->getOrderTotal(false, Cart::ONLY_SHIPPING);  
-$cartTotal = $cart->getOrderTotal(true);
+        // Calcular total UNA SOLA VEZ
+        $cartTotal = $cart->getOrderTotal(true);
 
-$this->log('DIAGNÓSTICO CARRITO:');
-$this->log('  - Productos: ' . $productsTotal . '€');
-$this->log('  - Envío: ' . $shippingTotal . '€');
-$this->log('  - Total: ' . $cartTotal . '€');
-$this->log('  - Estado configurado: ' . $shop['id_order_state']);
+        // Solo diagnóstico detallado si estamos en modo debug
+        if ($this->debug) {
+            $productsTotal = $cart->getOrderTotal(false, Cart::ONLY_PRODUCTS);
+            $shippingTotal = $cart->getOrderTotal(false, Cart::ONLY_SHIPPING);
+            $this->log('DEBUG CARRITO: Productos=' . $productsTotal . '€, Envío=' . $shippingTotal . '€, Total=' . $cartTotal . '€');
+        }
 
-if ($cartTotal <= 0) {
-    throw new Exception('El carrito tiene un total de 0€, no se puede crear el pedido');
-}
+        if ($cartTotal <= 0) {
+            throw new Exception('El carrito tiene un total de 0€, no se puede crear el pedido');
+        }
 
-$this->log('Creando pedido desde carrito ID: ' . $cart->id . ' Total: ' . $cartTotal . '€');
-        
         if (!$cart->id || $cart->OrderExists()) {
             throw new Exception('El carrito no es válido o ya tiene un pedido asociado');
         }
-        
+
+        $this->log('Creando pedido desde carrito ID: ' . $cart->id . ' Total: ' . $cartTotal . '€');
+
         // Usar PaymentModule para crear el pedido
         require_once(dirname(__FILE__) . '/classes/SyncroSeviPayment.php');
         $paymentModule = new SyncroSeviPayment();
@@ -1255,38 +1209,26 @@ $this->log('Creando pedido desde carrito ID: ' . $cart->id . ' Total: ' . $cartT
         $paymentModule->context = Context::getContext();
         $paymentModule->context->cart = $cart;
         $paymentModule->context->customer = new Customer($cart->id_customer);
-// DEBUG: Verificar transportista antes de crear pedido
-$currentCarrierId = $cart->id_carrier;
-$this->log('DEBUG ANTES validateOrder - Carrito ID: ' . $cart->id . ', Transportista: ' . $currentCarrierId);
 
-// FORZAR que el carrito mantenga el transportista
-$cart->id_carrier = $currentCarrierId;
-$cart->update();
+        // Asegurar que el transportista está configurado
+        $cart->update();
 
-// Verificar de nuevo
-$cart = new Cart($cart->id); // Recargar carrito
-$this->log('DEBUG DESPUÉS de forzar - Carrito reloadado, Transportista: ' . $cart->id_carrier);
-$result = $paymentModule->validateOrder(
-    $cart->id,
-    (int)$shop['id_order_state'],
-    $cartTotal,
-    'SyncroSevi - ' . $shop['name'],
-    'Pedido consolidado de ' . $shop['name'] . ' - Fecha: ' . date('Y-m-d H:i:s'),
-    array(),
-    (int)$cart->id_currency,
-    false,
-    $cart->secure_key
-);
-        
+        $result = $paymentModule->validateOrder(
+            $cart->id,
+            (int)$shop['id_order_state'],
+            $cartTotal,
+            'SyncroSevi - ' . $shop['name'],
+            'Pedido consolidado de ' . $shop['name'] . ' - Fecha: ' . date('Y-m-d H:i:s'),
+            array(),
+            (int)$cart->id_currency,
+            false,
+            $cart->secure_key
+        );
+
         if ($result && $paymentModule->currentOrder) {
-    $orderId = $paymentModule->currentOrder;
-    
-    // DEBUG: Verificar qué transportista tiene el pedido creado
-    $order = new Order($orderId);
-    $this->log('DEBUG PEDIDO CREADO - Pedido #' . $orderId . ', Transportista final: ' . $order->id_carrier);
-    
-    $this->log('✓ Pedido creado correctamente: #' . $orderId);
-    return $orderId;
+            $orderId = $paymentModule->currentOrder;
+            $this->log('✓ Pedido creado correctamente: #' . $orderId);
+            return $orderId;
         } else {
             throw new Exception('Error al crear pedido desde carrito - ValidateOrder falló');
         }
