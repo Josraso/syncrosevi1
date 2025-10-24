@@ -827,8 +827,8 @@ $updated = Db::getInstance()->update('syncrosevi_child_shops', array(
         try {
             $module = Module::getInstanceByName('syncrosevi');
 
-            // Obtener límite configurado (por defecto 50)
-            $batchLimit = (int)Configuration::get('SYNCROSEVI_BATCH_LIMIT') ?: 50;
+            // Obtener límite configurado (por defecto 10 - CONSERVADOR)
+            $batchLimit = (int)Configuration::get('SYNCROSEVI_BATCH_LIMIT') ?: 10;
 
             // Procesar con límite para evitar timeouts
             $results = $module->processOrders($batchLimit);

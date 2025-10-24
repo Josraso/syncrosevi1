@@ -74,12 +74,15 @@ try {
         break;
         
     case 'process':
-        $results = $module->processOrders();
+        // IMPORTANTE: Usar límite para evitar timeouts y memoria agotada
+        $batchLimit = (int)Configuration::get('SYNCROSEVI_BATCH_LIMIT') ?: 20;
+        $results = $module->processOrders($batchLimit);
         echo json_encode(array(
-            'success' => true, 
+            'success' => true,
             'action' => 'process',
             'results' => $results,
             'count' => is_array($results) ? count($results) : 0,
+            'batch_limit' => $batchLimit,
             'timestamp' => date('Y-m-d H:i:s')
         ));
         break;

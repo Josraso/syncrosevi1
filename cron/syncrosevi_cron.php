@@ -117,8 +117,8 @@ class SyncroSeviCron
         $this->log("=== INICIANDO PROCESAMIENTO DE PEDIDOS ===");
 
         try {
-            // Obtener límite configurado (por defecto 50 si no existe)
-            $batchLimit = (int)Configuration::get('SYNCROSEVI_BATCH_LIMIT') ?: 50;
+            // Obtener límite configurado (por defecto 10 si no existe - CONSERVADOR)
+            $batchLimit = (int)Configuration::get('SYNCROSEVI_BATCH_LIMIT') ?: 10;
             $this->log("Límite de lote configurado: {$batchLimit} pedidos por tienda");
 
             // Procesar con límite para evitar timeouts

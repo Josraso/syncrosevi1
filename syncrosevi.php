@@ -250,9 +250,10 @@ class Syncrosevi extends Module
         $webhook_token = md5('syncrosevi_' . Configuration::get('PS_SHOP_NAME') . '_' . Configuration::get('PS_SHOP_EMAIL') . '_' . uniqid() . '_' . time());
         Configuration::updateValue('SYNCROSEVI_WEBHOOK_TOKEN', $webhook_token);
 
-        // Configurar límite de procesamiento por lotes (por defecto 50 pedidos por ejecución)
+        // Configurar límite de procesamiento por lotes (por defecto 10 pedidos por ejecución - CONSERVADOR)
         // Evita timeouts y sobrecarga cuando hay muchos pedidos pendientes
-        Configuration::updateValue('SYNCROSEVI_BATCH_LIMIT', 50);
+        // Puedes aumentarlo a 20-30 si tu servidor tiene recursos suficientes
+        Configuration::updateValue('SYNCROSEVI_BATCH_LIMIT', 10);
 
         // Crear directorio de logs
         $logDir = dirname(__FILE__) . '/logs';
@@ -449,6 +450,18 @@ $sql[] = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . 'syncrosevi_order_tracki
     if (!$hasDateRealtime) {
         Db::getInstance()->execute('ALTER TABLE `' . _DB_PREFIX_ . 'syncrosevi_order_tracking` ADD COLUMN `date_realtime` datetime NULL DEFAULT NULL AFTER `date_sync`');
     }
+
+    // ACTUALIZACIÓN: Añadir configuraciones faltantes si no existen
+    // Esto permite actualizar módulos ya instalados sin reinstalar
+    if (!Configuration::get('SYNCROSEVI_BATCH_LIMIT')) {
+        Configuration::updateValue('SYNCROSEVI_BATCH_LIMIT', 20); // Valor conservador por defecto
+    }
+
+    if (!Configuration::get('SYNCROSEVI_WEBHOOK_TOKEN')) {
+        // Regenerar token si no existe (para instalaciones antiguas)
+        $webhook_token = md5('syncrosevi_' . Configuration::get('PS_SHOP_NAME') . '_' . Configuration::get('PS_SHOP_EMAIL') . '_' . uniqid() . '_' . time());
+        Configuration::updateValue('SYNCROSEVI_WEBHOOK_TOKEN', $webhook_token);
+    }
 }
 
     /**
@@ -609,10 +622,23 @@ $sql[] = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . 'syncrosevi_order_tracki
 	/**
      * Procesar pedidos pendientes - CREAR UN SOLO PEDIDO CONSOLIDADO
      *
-     * @param int $limit Número máximo de pedidos a procesar por tienda (0 = sin límite)
+     * @param int $limit Número máximo de pedidos a procesar por tienda (null = usar configuración)
      */
-    public function processOrders($limit = 0)
+    public function processOrders($limit = null)
     {
+        // Si no se especifica límite, usar el configurado (por defecto 10)
+        if ($limit === null) {
+            $limit = (int)Configuration::get('SYNCROSEVI_BATCH_LIMIT') ?: 10;
+        }
+
+        // Forzar límite mínimo de seguridad (nunca procesar más de 50 pedidos de golpe)
+        if ($limit <= 0 || $limit > 50) {
+            $limit = 10;
+            $this->log('ADVERTENCIA: Límite ajustado a 10 pedidos por seguridad');
+        }
+
+        $this->log('Procesando con límite de ' . $limit . ' pedidos por tienda');
+
         $childShops = Db::getInstance()->executeS(
             'SELECT * FROM `' . _DB_PREFIX_ . 'syncrosevi_child_shops` WHERE `active` = 1'
         );
@@ -621,33 +647,29 @@ $sql[] = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . 'syncrosevi_order_tracki
 
         foreach ($childShops as $shop) {
             try {
-                // Obtener las líneas pendientes para esta tienda (con límite opcional)
+                // SIEMPRE aplicar límite de seguridad
+                // Primero obtenemos los IDs de pedidos únicos con límite
+                $limitedOrderIds = Db::getInstance()->executeS(
+                    'SELECT DISTINCT id_original_order FROM `' . _DB_PREFIX_ . 'syncrosevi_order_lines`
+                     WHERE id_child_shop = ' . (int)$shop['id_child_shop'] . '
+                     AND processed = 0
+                     LIMIT ' . (int)$limit
+                );
+
+                if (empty($limitedOrderIds)) {
+                    continue;
+                }
+
+                // Extraer solo los IDs
+                $orderIds = array_map(function($row) { return (int)$row['id_original_order']; }, $limitedOrderIds);
+
+                // Obtener solo las líneas de estos pedidos limitados
                 $sql = 'SELECT * FROM `' . _DB_PREFIX_ . 'syncrosevi_order_lines`
                         WHERE id_child_shop = ' . (int)$shop['id_child_shop'] . '
-                        AND processed = 0';
+                        AND processed = 0
+                        AND id_original_order IN (' . implode(',', $orderIds) . ')';
 
-                // Si hay límite, aplicarlo por cantidad de pedidos distintos
-                if ($limit > 0) {
-                    // Primero obtenemos los IDs de pedidos únicos con límite
-                    $limitedOrderIds = Db::getInstance()->executeS(
-                        'SELECT DISTINCT id_original_order FROM `' . _DB_PREFIX_ . 'syncrosevi_order_lines`
-                         WHERE id_child_shop = ' . (int)$shop['id_child_shop'] . '
-                         AND processed = 0
-                         LIMIT ' . (int)$limit
-                    );
-
-                    if (empty($limitedOrderIds)) {
-                        continue;
-                    }
-
-                    // Extraer solo los IDs
-                    $orderIds = array_map(function($row) { return (int)$row['id_original_order']; }, $limitedOrderIds);
-
-                    // Modificar consulta para obtener solo líneas de estos pedidos
-                    $sql .= ' AND id_original_order IN (' . implode(',', $orderIds) . ')';
-
-                    $this->log('Procesando lote de ' . count($orderIds) . ' pedidos para tienda ' . $shop['name']);
-                }
+                $this->log('Procesando lote de ' . count($orderIds) . ' pedidos para tienda ' . $shop['name']);
 
                 $pendingLines = Db::getInstance()->executeS($sql);
 
