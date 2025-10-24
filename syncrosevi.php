@@ -38,9 +38,37 @@ class Syncrosevi extends Module
         $this->displayName = $this->l('SyncroSevi - Sincronización de Pedidos');
         $this->description = $this->l('Módulo para sincronizar pedidos entre tienda madre e hijas mediante WebService');
         $this->confirmUninstall = $this->l('¿Estás seguro de que quieres desinstalar?');
+
+        // AUTO-CONFIGURACIÓN: Crear configuraciones faltantes en instalaciones existentes
+        // Esto se ejecuta automáticamente la primera vez que se carga el módulo actualizado
+        $this->ensureConfigurationExists();
     }
 
-    private function log($message) 
+    /**
+     * Asegurar que las configuraciones necesarias existen
+     * Se ejecuta automáticamente al cargar el módulo (constructor)
+     * Permite actualizar instalaciones existentes sin reinstalar
+     */
+    private function ensureConfigurationExists()
+    {
+        // Solo ejecutar si el módulo está instalado
+        if (!Module::isInstalled('syncrosevi')) {
+            return;
+        }
+
+        // Crear SYNCROSEVI_BATCH_LIMIT si no existe
+        if (!Configuration::get('SYNCROSEVI_BATCH_LIMIT')) {
+            Configuration::updateValue('SYNCROSEVI_BATCH_LIMIT', 10);
+        }
+
+        // Crear SYNCROSEVI_WEBHOOK_TOKEN si no existe
+        if (!Configuration::get('SYNCROSEVI_WEBHOOK_TOKEN')) {
+            $webhook_token = md5('syncrosevi_' . Configuration::get('PS_SHOP_NAME') . '_' . Configuration::get('PS_SHOP_EMAIL') . '_' . uniqid() . '_' . time());
+            Configuration::updateValue('SYNCROSEVI_WEBHOOK_TOKEN', $webhook_token);
+        }
+    }
+
+    private function log($message)
     {
         if ($this->debug) {
             $logFile = dirname(__FILE__) . '/logs/syncrosevi_debug.log';
@@ -451,17 +479,8 @@ $sql[] = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . 'syncrosevi_order_tracki
         Db::getInstance()->execute('ALTER TABLE `' . _DB_PREFIX_ . 'syncrosevi_order_tracking` ADD COLUMN `date_realtime` datetime NULL DEFAULT NULL AFTER `date_sync`');
     }
 
-    // ACTUALIZACIÓN: Añadir configuraciones faltantes si no existen
-    // Esto permite actualizar módulos ya instalados sin reinstalar
-    if (!Configuration::get('SYNCROSEVI_BATCH_LIMIT')) {
-        Configuration::updateValue('SYNCROSEVI_BATCH_LIMIT', 20); // Valor conservador por defecto
-    }
-
-    if (!Configuration::get('SYNCROSEVI_WEBHOOK_TOKEN')) {
-        // Regenerar token si no existe (para instalaciones antiguas)
-        $webhook_token = md5('syncrosevi_' . Configuration::get('PS_SHOP_NAME') . '_' . Configuration::get('PS_SHOP_EMAIL') . '_' . uniqid() . '_' . time());
-        Configuration::updateValue('SYNCROSEVI_WEBHOOK_TOKEN', $webhook_token);
-    }
+    // Las configuraciones se crean automáticamente en ensureConfigurationExists()
+    // que se ejecuta en el constructor del módulo
 }
 
     /**
